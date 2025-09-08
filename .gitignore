@@ -1,0 +1,26 @@
+# Canvas Configuration (contains sensitive API tokens)
+~/.canvas-config/
+.canvas-config/
+config
+*.token
+
+# Log files
+*.log
+canvas-assign.log
+
+# Temporary files
+*.tmp
+.DS_Store
+
+# IDE files
+.vscode/
+.idea/
+
+# Backup files
+*~
+*.bak
+*.swp
+
+# Local test files
+test_*.sh
+debug_*.sh

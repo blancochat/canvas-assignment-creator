@@ -1,0 +1,12 @@
+# Canvas LMS Configuration Example
+# Copy this file to ~/.canvas-config/config and update with your values
+
+# Your Canvas instance URL (without trailing slash)
+CANVAS_URL=https://your-institution.instructure.com
+
+# Your Canvas API token (generate in Canvas: Account → Settings → Approved Integrations)
+API_TOKEN=your_api_token_here
+
+# Note: This file will be created automatically when you run the script
+# and choose to save your configuration. The actual file will have proper
+# permissions (600) for security.
