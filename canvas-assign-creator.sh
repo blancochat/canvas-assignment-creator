@@ -1532,87 +1532,131 @@ main_menu() {
         echo "=========================="
         
         local course_count=${#SELECTED_COURSE_IDS[@]:-0}
+        
         if [[ $course_count -eq 0 ]]; then
+            # No courses selected - show course selection menu only
             warning "No course selected. Please select a course first."
-        elif [[ $course_count -eq 1 ]]; then
-            success "Selected course: ${SELECTED_COURSE_NAMES[0]}"
+            
+            echo -e "\n${BOLD}SELECT COURSE(S)${NC}"
+            echo "1. Select a single course"
+            echo "2. Select multiple courses"
+            echo "3. Refresh course list from Canvas"
+            
+            echo -e "\n${BOLD}SETTINGS${NC}"
+            echo "4. Reconfigure Canvas settings"
+            echo "q. Quit"
+            
         else
-            success "Selected $course_count courses:"
-            for i in "${!SELECTED_COURSE_NAMES[@]}"; do
-                echo "  $((i+1)). ${SELECTED_COURSE_NAMES[$i]}"
-            done
+            # Courses selected - show full menu
+            if [[ $course_count -eq 1 ]]; then
+                success "Selected course: ${SELECTED_COURSE_NAMES[0]}"
+            else
+                success "Selected $course_count courses:"
+                for i in "${!SELECTED_COURSE_NAMES[@]}"; do
+                    echo "  $((i+1)). ${SELECTED_COURSE_NAMES[$i]}"
+                done
+            fi
+            
+            echo -e "\n${BOLD}ACTIONS${NC}"
+            echo "1. Create a new assignment"
+            
+            echo -e "\n${BOLD}COURSE MANAGEMENT${NC}"
+            echo "2. Change selected course(s)"
+            echo "3. Select additional courses"
+            echo "4. Clear course selection"
+            echo "5. Refresh course list from Canvas"
+            
+            echo -e "\n${BOLD}UTILITIES${NC}"
+            echo "6. Manage local files"
+            echo "7. Reconfigure Canvas settings"
+            echo "q. Quit"
         fi
-        
-        echo -e "\n${BOLD}ACTIONS${NC}"
-        echo "1. Create a new assignment"
-        
-        echo -e "\n${BOLD}COURSE MANAGEMENT${NC}"
-        echo "2. Select a single course"
-        echo "3. Select multiple courses"
-        echo "4. Refresh course list from Canvas"
-        
-        echo -e "\n${BOLD}UTILITIES${NC}"
-        echo "5. Manage local files"
-        echo "6. Reconfigure Canvas settings"
-        echo "q. Quit"
         
         read -r -p "Choose option: " choice
         
+        local course_count=${#SELECTED_COURSE_IDS[@]:-0}
         case $choice in
             1)
-                # Create a new assignment
-                local course_count=${#SELECTED_COURSE_IDS[@]:-0}
                 if [[ $course_count -eq 0 ]]; then
-                    error "No course selected."
-                    read -r -p "Select a course now? (Y/n): " sel_choice
-                    if [[ "$sel_choice" != "n" && "$sel_choice" != "N" ]]; then
-                        display_courses || continue
-                        # After selection, re-check and proceed
-                        [[ ${#SELECTED_COURSE_IDS[@]:-0} -eq 0 ]] && continue
-                    else
+                    # No courses selected - Option 1: Select a single course
+                    if display_courses; then
+                        # Ensure single selection state
+                        SELECTED_COURSE_IDS=("${SELECTED_COURSE_ID}")
+                        SELECTED_COURSE_NAMES=("${SELECTED_COURSE_NAME}")
+                    fi
+                else
+                    # Courses selected - Option 1: Create a new assignment
+                    local assignment_data
+                    if ! assignment_data=$(collect_assignment_details); then
+                        info "Assignment creation cancelled."
                         continue
                     fi
-                fi
-                
-                # Re-evaluate count after potential selection
-                course_count=${#SELECTED_COURSE_IDS[@]:-0}
-                
-                local assignment_data
-                if ! assignment_data=$(collect_assignment_details); then
-                    info "Assignment creation cancelled."
-                    continue
-                fi
-                
-                if [[ $course_count -eq 1 ]]; then
-                    create_assignment "$assignment_data"
-                else
-                    create_assignments_multi_course "$assignment_data"
+                    
+                    if [[ $course_count -eq 1 ]]; then
+                        create_assignment "$assignment_data"
+                    else
+                        create_assignments_multi_course "$assignment_data"
+                    fi
                 fi
                 ;;
             2)
-                # Select a single course
-                if display_courses; then
-                    # Ensure single selection state
-                    SELECTED_COURSE_IDS=("${SELECTED_COURSE_ID}")
-                    SELECTED_COURSE_NAMES=("${SELECTED_COURSE_NAME}")
+                if [[ $course_count -eq 0 ]]; then
+                    # No courses selected - Option 2: Select multiple courses
+                    select_multiple_courses || continue
+                else
+                    # Courses selected - Option 2: Change selected course(s)
+                    if display_courses; then
+                        # Ensure single selection state
+                        SELECTED_COURSE_IDS=("${SELECTED_COURSE_ID}")
+                        SELECTED_COURSE_NAMES=("${SELECTED_COURSE_NAME}")
+                    fi
                 fi
                 ;;
             3)
-                # Select multiple courses
-                select_multiple_courses || continue
+                if [[ $course_count -eq 0 ]]; then
+                    # No courses selected - Option 3: Refresh course list
+                    get_courses
+                    info "Course list has been refreshed."
+                else
+                    # Courses selected - Option 3: Select additional courses
+                    select_multiple_courses || continue
+                fi
                 ;;
             4)
-                # Refresh course list
-                get_courses
-                info "Course list has been refreshed."
+                if [[ $course_count -eq 0 ]]; then
+                    # No courses selected - Option 4: Reconfigure Canvas settings
+                    setup_canvas
+                else
+                    # Courses selected - Option 4: Clear course selection
+                    SELECTED_COURSE_IDS=()
+                    SELECTED_COURSE_NAMES=()
+                    success "Course selection cleared."
+                fi
                 ;;
             5)
-                # Manage files
-                manage_files
+                # Courses selected only - Option 5: Refresh course list
+                if [[ $course_count -gt 0 ]]; then
+                    get_courses
+                    info "Course list has been refreshed."
+                else
+                    error "Invalid option. Please choose a valid option."
+                fi
                 ;;
             6)
-                # Reconfigure settings
-                setup_canvas
+                # Courses selected only - Option 6: Manage files
+                if [[ $course_count -gt 0 ]]; then
+                    manage_files
+                else
+                    error "Invalid option. Please choose a valid option."
+                fi
+                ;;
+            7)
+                # Courses selected only - Option 7: Reconfigure settings
+                if [[ $course_count -gt 0 ]]; then
+                    setup_canvas
+                else
+                    error "Invalid option. Please choose a valid option."
+                fi
                 ;;
             q|Q)
                 echo "Goodbye!"
