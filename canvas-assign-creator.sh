@@ -128,6 +128,12 @@ validate_canvas_url() {
         url="https://$url"
     fi
     
+    # Enforce HTTPS for Canvas URLs
+    if [[ "$url" =~ ^http://(.*)$ ]]; then
+        url="https://${BASH_REMATCH[1]}"
+        info "🔒 Automatically upgraded Canvas URL to HTTPS for security"
+    fi
+    
     url="${url%/}"
     
     if ! curl -s --head "$url" > /dev/null 2>&1; then
@@ -690,7 +696,27 @@ format_date() {
     fi
 }
 
-# Validate URL format
+# Convert HTTP to HTTPS and validate URL format
+validate_and_enforce_https() {
+    local url="$1"
+    
+    # First check if it's a valid URL format
+    if [[ ! "$url" =~ ^https?://[^[:space:]]+$ ]]; then
+        return 1
+    fi
+    
+    # Convert HTTP to HTTPS if needed
+    if [[ "$url" =~ ^http://(.*)$ ]]; then
+        url="https://${BASH_REMATCH[1]}"
+        echo "🔒 Automatically upgraded HTTP to HTTPS: $url" >&2
+    fi
+    
+    # Return the (potentially modified) URL
+    echo "$url"
+    return 0
+}
+
+# Validate URL format (legacy function for backward compatibility)
 validate_url() {
     local url="$1"
     if [[ "$url" =~ ^https?://[^[:space:]]+$ ]]; then
@@ -698,6 +724,210 @@ validate_url() {
     else
         return 1
     fi
+}
+
+# Detect content type from URL
+detect_content_type() {
+    local url="$1"
+    local url_lower=$(echo "$url" | tr '[:upper:]' '[:lower:]')
+    
+    # YouTube detection
+    if [[ "$url_lower" =~ youtube\.com|youtu\.be ]]; then
+        echo "youtube"
+        return 0
+    fi
+    
+    # Google Slides detection
+    if [[ "$url_lower" =~ docs\.google\.com/presentation ]]; then
+        echo "google_slides"
+        return 0
+    fi
+    
+    # File extension detection
+    if [[ "$url_lower" =~ \.(pptx?|ppt)(\?|$) ]]; then
+        echo "powerpoint"
+    elif [[ "$url_lower" =~ \.(mov|mp4|avi|webm|mkv)(\?|$) ]]; then
+        echo "video"
+    elif [[ "$url_lower" =~ \.(pdf)(\?|$) ]]; then
+        echo "pdf"
+    elif [[ "$url_lower" =~ \.(jpe?g|png|gif|webp|svg)(\?|$) ]]; then
+        echo "image"
+    elif [[ "$url_lower" =~ \.(docx?|doc)(\?|$) ]]; then
+        echo "word"
+    elif [[ "$url_lower" =~ \.(xlsx?|xls)(\?|$) ]]; then
+        echo "excel"
+    else
+        echo "generic"
+    fi
+}
+
+# Convert YouTube URL to embed format
+convert_youtube_url() {
+    local url="$1"
+    local video_id=""
+    
+    # Extract video ID from various YouTube URL formats
+    if [[ "$url" =~ youtube\.com/watch.*[?\&]v=([^\&]+) ]]; then
+        video_id="${BASH_REMATCH[1]}"
+    elif [[ "$url" =~ youtu\.be/([^?]+) ]]; then
+        video_id="${BASH_REMATCH[1]}"
+    elif [[ "$url" =~ youtube\.com/embed/([^?]+) ]]; then
+        video_id="${BASH_REMATCH[1]}"
+    fi
+    
+    if [[ -n "$video_id" ]]; then
+        echo "https://www.youtube.com/embed/$video_id"
+    else
+        echo "$url"  # Return original if can't parse
+    fi
+}
+
+# Convert PowerPoint to Office Online embed
+convert_powerpoint_url() {
+    local url="$1"
+    # Use Microsoft Office Online viewer for PowerPoint files
+    echo "https://view.officeapps.live.com/op/embed.aspx?src=$(echo "$url" | sed 's/&/%26/g')"
+}
+
+# Generate optimized iframe based on content type
+generate_smart_iframe() {
+    local url="$1"
+    local content_type="$2"
+    local alt_text="$3"
+    local size_option="$4"
+    
+    # DEBUG: Log function inputs
+    echo "DEBUG: generate_smart_iframe called with:" >&2
+    echo "  URL: $url" >&2
+    echo "  Content Type: $content_type" >&2
+    echo "  Alt Text: $alt_text" >&2
+    echo "  Size Option: $size_option" >&2
+    
+    local embed_url="$url"
+    local iframe_tag=""
+    
+    case "$content_type" in
+        "youtube")
+            embed_url=$(convert_youtube_url "$url")
+            case $size_option in
+                1) # Standard
+                    iframe_tag="<iframe src=\"$embed_url\" style=\"width: 100%; height: 315px; border: 1px solid #ccc;\""
+                    ;;
+                2) # Responsive 16:9
+                    local container_style="width: 100%; max-width: 800px;"
+                    local wrapper_style="position: relative; width: 100%; overflow: hidden; padding-top: 56.25%;"
+                    local iframe_style="position: absolute; top: 0; left: 0; right: 0; width: 100%; height: 100%; border: 1px solid #ccc;"
+                    iframe_tag="<div style=\"$container_style\"><div style=\"$wrapper_style\"><iframe src=\"$embed_url\" style=\"$iframe_style\""
+                    [[ -n "$alt_text" ]] && iframe_tag="$iframe_tag title=\"$alt_text\""
+                    iframe_tag="$iframe_tag allowfullscreen></iframe></div></div>"
+                    return 0
+                    ;;
+                3) # Custom size
+                    read -r -p "Enter width (default: 100%): " custom_width
+                    custom_width="${custom_width:-100%}"
+                    read -r -p "Enter height in pixels (default: 315): " custom_height
+                    custom_height="${custom_height:-315}"
+                    [[ "$custom_height" =~ ^[0-9]+$ ]] && custom_height="${custom_height}px"
+                    iframe_tag="<iframe src=\"$embed_url\" style=\"width: $custom_width; height: $custom_height; border: 1px solid #ccc;\""
+                    ;;
+            esac
+            ;;
+        "powerpoint")
+            echo "DEBUG: Processing PowerPoint..." >&2
+            embed_url=$(convert_powerpoint_url "$url")
+            echo "DEBUG: Converted URL: $embed_url" >&2
+            
+            # Always use responsive for PowerPoint
+            local container_style="width: 100%; max-width: 1000px;"
+            local wrapper_style="position: relative; width: 100%; overflow: hidden; padding-top: 66.67%;" # 3:2 aspect ratio for presentations
+            local iframe_style="position: absolute; top: 0; left: 0; right: 0; width: 100%; height: 100%; border: 1px solid #ccc;"
+            iframe_tag="<div style=\"$container_style\"><div style=\"$wrapper_style\"><iframe src=\"$embed_url\" style=\"$iframe_style\""
+            [[ -n "$alt_text" ]] && iframe_tag="$iframe_tag title=\"$alt_text\""
+            iframe_tag="$iframe_tag allowfullscreen></iframe></div></div>"
+            
+            echo "DEBUG: Generated PowerPoint iframe (length: ${#iframe_tag})" >&2
+            echo "DEBUG: iframe_tag: $iframe_tag" >&2
+            echo "$iframe_tag"
+            return 0
+            ;;
+        "google_slides")
+            echo "DEBUG: Processing Google Slides..." >&2
+            # Convert to embed format
+            embed_url=$(echo "$url" | sed 's|/edit.*|/embed?start=false\&loop=false\&delayms=3000|')
+            echo "DEBUG: Converted URL: $embed_url" >&2
+            
+            local container_style="width: 100%; max-width: 1000px;"
+            local wrapper_style="position: relative; width: 100%; overflow: hidden; padding-top: 66.67%;"
+            local iframe_style="position: absolute; top: 0; left: 0; right: 0; width: 100%; height: 100%; border: 1px solid #ccc;"
+            iframe_tag="<div style=\"$container_style\"><div style=\"$wrapper_style\"><iframe src=\"$embed_url\" style=\"$iframe_style\""
+            [[ -n "$alt_text" ]] && iframe_tag="$iframe_tag title=\"$alt_text\""
+            iframe_tag="$iframe_tag allowfullscreen></iframe></div></div>"
+            
+            echo "DEBUG: Generated Google Slides iframe (length: ${#iframe_tag})" >&2
+            echo "DEBUG: iframe_tag: $iframe_tag" >&2
+            echo "$iframe_tag"
+            return 0
+            ;;
+        "video")
+            echo "DEBUG: Processing video file..." >&2
+            case $size_option in
+                1) 
+                    iframe_tag="<video controls style=\"width: 100%; max-width: 800px; height: auto; border: 1px solid #ccc;\"><source src=\"$embed_url\" type=\"video/mp4\">Your browser does not support the video tag.</video>"
+                    echo "DEBUG: Generated video tag (option 1, length: ${#iframe_tag})" >&2
+                    echo "$iframe_tag"
+                    return 0
+                    ;;
+                2) 
+                    local container_style="width: 100%; max-width: 800px;"
+                    local wrapper_style="position: relative; width: 100%; overflow: hidden; padding-top: 56.25%;"
+                    local video_style="position: absolute; top: 0; left: 0; right: 0; width: 100%; height: 100%; border: 1px solid #ccc;"
+                    iframe_tag="<div style=\"$container_style\"><div style=\"$wrapper_style\"><video controls style=\"$video_style\"><source src=\"$embed_url\" type=\"video/mp4\">Your browser does not support the video tag.</video></div></div>"
+                    echo "DEBUG: Generated responsive video (option 2, length: ${#iframe_tag})" >&2
+                    echo "$iframe_tag"
+                    return 0
+                    ;;
+                3) 
+                    read -r -p "Enter max width (default: 800px): " custom_width
+                    custom_width="${custom_width:-800px}"
+                    iframe_tag="<video controls style=\"width: 100%; max-width: $custom_width; height: auto; border: 1px solid #ccc;\"><source src=\"$embed_url\" type=\"video/mp4\">Your browser does not support the video tag.</video>"
+                    echo "DEBUG: Generated custom video (option 3, length: ${#iframe_tag})" >&2
+                    echo "$iframe_tag"
+                    return 0
+                    ;;
+            esac
+            ;;
+        *)
+            # Generic iframe handling
+            case $size_option in
+                1) iframe_tag="<iframe src=\"$embed_url\" style=\"width: 100%; height: 400px; border: 1px solid #ccc; overflow: hidden;\"" ;;
+                2) 
+                    local container_style="width: 100%; max-width: 800px;"
+                    local wrapper_style="position: relative; width: 100%; overflow: hidden; padding-top: 56.25%;"
+                    local iframe_style="position: absolute; top: 0; left: 0; right: 0; width: 100%; height: 100%; border: 1px solid #ccc;"
+                    iframe_tag="<div style=\"$container_style\"><div style=\"$wrapper_style\"><iframe src=\"$embed_url\" style=\"$iframe_style\""
+                    [[ -n "$alt_text" ]] && iframe_tag="$iframe_tag title=\"$alt_text\""
+                    iframe_tag="$iframe_tag allowfullscreen></iframe></div></div>"
+                    return 0
+                    ;;
+                3) 
+                    read -r -p "Enter width (default: 100%): " custom_width
+                    custom_width="${custom_width:-100%}"
+                    read -r -p "Enter height in pixels (default: 400): " custom_height
+                    custom_height="${custom_height:-400}"
+                    [[ "$custom_height" =~ ^[0-9]+$ ]] && custom_height="${custom_height}px"
+                    iframe_tag="<iframe src=\"$embed_url\" style=\"width: $custom_width; height: $custom_height; border: 1px solid #ccc; overflow: hidden;\""
+                    ;;
+            esac
+            ;;
+    esac
+    
+    # Add title and close tag for standard iframes
+    [[ -n "$alt_text" ]] && iframe_tag="$iframe_tag title=\"$alt_text\""
+    if [[ "$iframe_tag" == *"<iframe"* ]] && [[ "$iframe_tag" != *"</iframe>"* ]]; then
+        iframe_tag="$iframe_tag></iframe>"
+    fi
+    
+    echo "$iframe_tag"
 }
 
 # Validate Google Docs URL
@@ -867,15 +1097,25 @@ get_content_type() {
 collect_assignment_images() {
     local images_html=""
     
-    echo -e "\n${BOLD}${CYAN}Assignment Images${NC}" >&2
-    echo "=================" >&2
-    echo "You can add images to your assignment description." >&2
-    echo "Options:" >&2
-    echo "1. External image URLs (recommended)" >&2
+    echo -e "\n${BOLD}${CYAN}Assignment Content${NC}" >&2
+    echo "==================" >&2
+    echo "You can embed various types of content in your assignment description." >&2
+    echo "" >&2
+    echo -e "${BOLD}Supported content types:${NC}" >&2
+    echo "• 📊 PowerPoint presentations (.pptx, .ppt)" >&2
+    echo "• 📊 Google Slides presentations" >&2
+    echo "• 🎥 YouTube videos & playlists" >&2
+    echo "• 🎬 Video files (.mov, .mp4, .avi, .webm)" >&2
+    echo "• 📄 PDF documents" >&2
+    echo "• 🖼️  Images (.jpg, .png, .gif, .webp, .svg)" >&2
+    echo "• 🌐 Any web content (embedded as iframe)" >&2
+    echo "" >&2
+    echo -e "${BOLD}Options:${NC}" >&2
+    echo "1. External URLs (PowerPoint, Google Slides, YouTube, etc.)" >&2
     echo "2. Local image files (will be uploaded to Canvas)" >&2
     echo "" >&2
     
-    read -r -p "Do you want to add images to this assignment? (y/N): " add_images
+    read -r -p "Do you want to add content to this assignment? (y/N): " add_images
     if [[ "$add_images" != "y" && "$add_images" != "Y" ]]; then
         return 0
     fi
@@ -883,100 +1123,104 @@ collect_assignment_images() {
     local image_count=0
     while true; do
         echo "" >&2
-        echo "Image $((image_count + 1)):" >&2
-        echo "1. Enter content URL (embedded as responsive iframe)" >&2
-        echo "2. Upload local file" >&2
-        echo "3. Done adding images" >&2
+        echo "Content Item $((image_count + 1)):" >&2
+        echo "1. Add content URL (PowerPoint, YouTube, Google Slides, etc.)" >&2
+        echo "2. Upload local image file" >&2
+        echo "3. Done adding content" >&2
         echo "" >&2
         read -r -p "Choose option (1-3): " image_option
         
         case $image_option in
             1)
-                read -r -p "Enter content URL (https://...): " image_url
+                read -r -p "Enter content URL (http/https - will be upgraded to HTTPS): " image_url
                 if [[ -z "$image_url" ]]; then
                     echo -e "${YELLOW}⚠${NC} No URL entered, skipping..." >&2
                     continue
-                elif validate_url "$image_url"; then
-                    echo "" >&2
-                    echo "How should this be embedded?" >&2
-                    echo "1. As image (best for .jpg, .png, .gif - auto-scales)" >&2
-                    echo "2. As iframe (best for interactive content, PDFs)" >&2
-                    read -r -p "Choose embedding type (1-2): " embed_type
-                    embed_type="${embed_type:-1}"
-                    read -r -p "Enter alt text/title (optional): " alt_text
-                    
-                    local img_tag=""
-                    
-                    if [[ "$embed_type" == "1" ]]; then
-                        # Image embedding - auto-scales and responsive
-                        echo "Choose image sizing:" >&2
-                        echo "1. Responsive (auto-scales, max width 100%)" >&2
-                        echo "2. Custom width" >&2
-                        read -r -p "Select option (1-2, default: 1): " img_option
-                        img_option="${img_option:-1}"
+                else
+                    # Validate and enforce HTTPS
+                    local https_url
+                    if https_url=$(validate_and_enforce_https "$image_url"); then
+                        # Update the URL to the HTTPS version
+                        image_url="$https_url"
                         
-                        case $img_option in
-                            1)
-                                img_tag="<img src=\"$image_url\" style=\"max-width: 100%; height: auto; border: 1px solid #ccc;\""
-                                [[ -n "$alt_text" ]] && img_tag="$img_tag alt=\"$alt_text\""
-                                img_tag="$img_tag />"
-                                ;;
-                            2)
-                                read -r -p "Enter max width (default: 800px): " custom_width
-                                custom_width="${custom_width:-800px}"
-                                [[ "$custom_width" =~ ^[0-9]+$ ]] && custom_width="${custom_width}px"
-                                
-                                img_tag="<img src=\"$image_url\" style=\"max-width: $custom_width; width: 100%; height: auto; border: 1px solid #ccc;\""
-                                [[ -n "$alt_text" ]] && img_tag="$img_tag alt=\"$alt_text\""
-                                img_tag="$img_tag />"
-                                ;;
-                        esac
-                        echo -e "${GREEN}✓${NC} Image added (auto-scaling)" >&2
-                    else
-                        # Iframe embedding
-                        echo "Choose iframe sizing:" >&2
-                        echo "1. Standard content (100% width, 300px height)" >&2
-                        echo "2. Video/interactive (16:9 responsive aspect ratio)" >&2
-                        echo "3. Custom dimensions" >&2
+                        # Detect content type automatically
+                        local content_type=$(detect_content_type "$image_url")
+                    
+                    echo "" >&2
+                    case "$content_type" in
+                        "youtube")
+                            echo -e "${BLUE}🎥 Detected: YouTube Video${NC}" >&2
+                            echo "Embedding options for YouTube:" >&2
+                            echo "1. Standard player (315px height)" >&2
+                            echo "2. Responsive player (16:9 aspect ratio)" >&2
+                            echo "3. Custom size" >&2
+                            ;;
+                        "powerpoint")
+                            echo -e "${BLUE}📊 Detected: PowerPoint Presentation${NC}" >&2
+                            echo "Will embed using Microsoft Office Online viewer (responsive)" >&2
+                            ;;
+                        "google_slides")
+                            echo -e "${BLUE}📊 Detected: Google Slides Presentation${NC}" >&2
+                            echo "Will embed as interactive slideshow (responsive)" >&2
+                            ;;
+                        "video")
+                            echo -e "${BLUE}🎬 Detected: Video File${NC}" >&2
+                            echo "Embedding options for video:" >&2
+                            echo "1. Standard player" >&2
+                            echo "2. Responsive player (16:9)" >&2
+                            echo "3. Custom size" >&2
+                            ;;
+                        "pdf")
+                            echo -e "${BLUE}📄 Detected: PDF Document${NC}" >&2
+                            echo "Will embed as iframe viewer" >&2
+                            ;;
+                        "image")
+                            echo -e "${BLUE}🖼️  Detected: Image File${NC}" >&2
+                            echo "Embedding as responsive image" >&2
+                            ;;
+                        *)
+                            echo -e "${BLUE}🌐 Detected: Web Content${NC}" >&2
+                            echo "Embedding options:" >&2
+                            echo "1. Standard iframe (400px height)" >&2
+                            echo "2. Responsive iframe (16:9)" >&2
+                            echo "3. Custom size" >&2
+                            ;;
+                    esac
+                    
+                    local size_option="1"
+                    if [[ "$content_type" != "powerpoint" && "$content_type" != "google_slides" && "$content_type" != "image" && "$content_type" != "pdf" ]]; then
                         read -r -p "Select option (1-3, default: 1): " size_option
                         size_option="${size_option:-1}"
-                        
-                        case $size_option in
-                            1)
-                                img_tag="<iframe src=\"$image_url\" style=\"width: 100%; height: 300px; border: 1px solid #ccc; overflow: hidden;\""
-                                [[ -n "$alt_text" ]] && img_tag="$img_tag title=\"$alt_text\""
-                                img_tag="$img_tag></iframe>"
-                                ;;
-                            2)
-                                local container_style="width: 100%; min-width: 400px; max-width: 800px;"
-                                local wrapper_style="position: relative; width: 100%; overflow: hidden; padding-top: 56.25%;"
-                                local iframe_style="position: absolute; top: 0; left: 0; right: 0; width: 100%; height: 100%; border: 1px solid #ccc;"
-                                
-                                img_tag="<div style=\"$container_style\"><div style=\"$wrapper_style\">"
-                                img_tag="$img_tag<iframe src=\"$image_url\" style=\"$iframe_style\""
-                                [[ -n "$alt_text" ]] && img_tag="$img_tag title=\"$alt_text\""
-                                img_tag="$img_tag allowfullscreen></iframe></div></div>"
-                                ;;
-                            3)
-                                read -r -p "Enter width (default: 100%): " custom_width
-                                custom_width="${custom_width:-100%}"
-                                read -r -p "Enter height in pixels (default: 400): " custom_height
-                                custom_height="${custom_height:-400}"
-                                [[ "$custom_height" =~ ^[0-9]+$ ]] && custom_height="${custom_height}px"
-                                
-                                img_tag="<iframe src=\"$image_url\" style=\"width: $custom_width; height: $custom_height; border: 1px solid #ccc; overflow: hidden;\""
-                                [[ -n "$alt_text" ]] && img_tag="$img_tag title=\"$alt_text\""
-                                img_tag="$img_tag></iframe>"
-                                ;;
-                        esac
-                        echo -e "${GREEN}✓${NC} Content URL added as iframe" >&2
                     fi
                     
-                    images_html="$images_html<p>$img_tag</p>"
-                    ((image_count++))
-                else
-                    echo -e "${RED}✗${NC} Invalid URL format: $image_url" >&2
-                    echo -e "${RED}✗${NC} Please use a valid https:// or http:// URL" >&2
+                    read -r -p "Enter alt text/title (optional): " alt_text
+                    
+                    # Generate optimized iframe using our smart function
+                    echo "DEBUG: About to call generate_smart_iframe..." >&2
+                    local img_tag=$(generate_smart_iframe "$image_url" "$content_type" "$alt_text" "$size_option")
+                    echo "DEBUG: generate_smart_iframe returned (length: ${#img_tag}): '$img_tag'" >&2
+                    
+                    if [[ -n "$img_tag" ]]; then
+                        images_html="$images_html<p>$img_tag</p>"
+                        
+                        case "$content_type" in
+                            "youtube") echo -e "${GREEN}✓${NC} YouTube video embedded" >&2 ;;
+                            "powerpoint") echo -e "${GREEN}✓${NC} PowerPoint presentation embedded (Office Online viewer)" >&2 ;;
+                            "google_slides") echo -e "${GREEN}✓${NC} Google Slides presentation embedded" >&2 ;;
+                            "video") echo -e "${GREEN}✓${NC} Video file embedded" >&2 ;;
+                            "pdf") echo -e "${GREEN}✓${NC} PDF document embedded" >&2 ;;
+                            "image") echo -e "${GREEN}✓${NC} Image embedded (responsive)" >&2 ;;
+                            *) echo -e "${GREEN}✓${NC} Content embedded as iframe" >&2 ;;
+                        esac
+                        
+                        ((image_count++))
+                        else
+                            echo -e "${RED}✗${NC} Failed to generate embedding code" >&2
+                        fi
+                    else
+                        echo -e "${RED}✗${NC} Invalid URL format: $image_url" >&2
+                        echo -e "${RED}✗${NC} Please use a valid https:// or http:// URL" >&2
+                    fi
                 fi
                 ;;
             2)
@@ -1071,7 +1315,11 @@ collect_google_docs_templates() {
                 if [[ -z "$docs_url" ]]; then
                     echo -e "${YELLOW}⚠${NC} No URL entered, skipping..." >&2
                     continue
-                elif validate_google_docs_url "$docs_url"; then
+                else
+                    # Validate and enforce HTTPS for Google Docs URLs
+                    local https_docs_url
+                    if https_docs_url=$(validate_and_enforce_https "$docs_url") && validate_google_docs_url "$https_docs_url"; then
+                        docs_url="$https_docs_url"
                     local doc_id doc_type template_url
                     doc_id=$(extract_google_docs_id "$docs_url")
                     doc_type=$(get_google_docs_type "$docs_url")
@@ -1105,13 +1353,14 @@ collect_google_docs_templates() {
                     template_html="$template_html<p><em>Click the link above to create your own copy of this template</em></p>"
                     template_html="$template_html</div>"
                     
-                    docs_html="$docs_html$template_html"
-                    echo -e "${GREEN}✓${NC} Google Docs template added: $template_name" >&2
-                    ((docs_count++))
-                else
-                    echo -e "${RED}✗${NC} Invalid Google Docs URL: $docs_url" >&2
-                    echo "Please use a valid Google Docs URL like:" >&2
-                    echo "https://docs.google.com/document/d/1ABCdef123.../edit" >&2
+                        docs_html="$docs_html$template_html"
+                        echo -e "${GREEN}✓${NC} Google Docs template added: $template_name" >&2
+                        ((docs_count++))
+                    else
+                        echo -e "${RED}✗${NC} Invalid Google Docs URL: $docs_url" >&2
+                        echo "Please use a valid Google Docs URL like:" >&2
+                        echo "https://docs.google.com/document/d/1ABCdef123.../edit" >&2
+                    fi
                 fi
                 ;;
             2)
@@ -1366,7 +1615,39 @@ create_assignment() {
         
         success "Assignment '$assignment_name' created successfully!"
         info "Assignment URL: $assignment_url"
-        return 0
+        
+        # Success confirmation and next actions
+        echo -e "\n${BOLD}${CYAN}🎉 Assignment Creation Complete!${NC}"
+        echo "====================================="
+        echo -e "${GREEN}✓${NC} Your assignment has been successfully created in Canvas"
+        echo -e "${BLUE}→${NC} You can view it at: $assignment_url"
+        echo ""
+        echo "What would you like to do next?"
+        echo "1. Create another assignment"
+        echo "2. Return to main menu" 
+        echo "3. Exit"
+        echo ""
+        read -r -p "Choose option (1-3, default: 2): " next_action
+        next_action="${next_action:-2}"
+        
+        case $next_action in
+            1)
+                echo -e "${BLUE}Starting new assignment creation...${NC}"
+                return 0  # This will continue the assignment creation flow
+                ;;
+            2)
+                echo -e "${BLUE}Returning to main menu...${NC}"
+                return 0
+                ;;
+            3)
+                echo "Thank you for using Canvas Assignment Creator! 👋"
+                exit 0
+                ;;
+            *)
+                echo -e "${BLUE}Returning to main menu...${NC}"
+                return 0
+                ;;
+        esac
     else
         error "Failed to create assignment"
         return 1
@@ -1451,6 +1732,42 @@ create_assignments_multi_course() {
             echo "  ✗ $course"
         done
         warning "Some assignments failed to create. Check permissions and course settings."
+    fi
+    
+    # Multi-course success confirmation and next actions
+    echo -e "\n${BOLD}${CYAN}🎉 Multi-Course Assignment Creation Complete!${NC}"
+    echo "================================================"
+    if [[ $success_count -eq ${#SELECTED_COURSE_IDS[@]} ]]; then
+        echo -e "${GREEN}✓${NC} All assignments created successfully across $success_count courses!"
+    else
+        echo -e "${YELLOW}⚠${NC} Created $success_count out of ${#SELECTED_COURSE_IDS[@]} assignments"
+    fi
+    echo ""
+    echo "What would you like to do next?"
+    echo "1. Create another assignment"
+    echo "2. Return to main menu"
+    echo "3. Exit"
+    echo ""
+    read -r -p "Choose option (1-3, default: 2): " next_action
+    next_action="${next_action:-2}"
+    
+    case $next_action in
+        1)
+            echo -e "${BLUE}Starting new assignment creation...${NC}"
+            ;;
+        2)
+            echo -e "${BLUE}Returning to main menu...${NC}"
+            ;;
+        3)
+            echo "Thank you for using Canvas Assignment Creator! 👋"
+            exit 0
+            ;;
+        *)
+            echo -e "${BLUE}Returning to main menu...${NC}"
+            ;;
+    esac
+    
+    if [[ ${#failed_courses[@]} -gt 0 ]]; then
         return 1
     fi
     
