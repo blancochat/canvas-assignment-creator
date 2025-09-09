@@ -59,7 +59,7 @@ check_dependencies() {
 # Logging functions
 log() {
     if [[ "$VERBOSE" == true ]]; then
-        echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+        echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE" >&2
     fi
 }
 
@@ -197,8 +197,10 @@ canvas_api() {
     local method="${1:-GET}"
     local endpoint="$2"
     local data="${3:-}"
-    local response_file
+    
+    local response_file error_file
     response_file=$(mktemp)
+    error_file=$(mktemp)
     
     local curl_args=(
         -s -w "%{http_code}"
@@ -209,20 +211,80 @@ canvas_api() {
     
     [[ -n "$data" ]] && curl_args+=(-d "$data")
     
-    local http_code
-    http_code=$(curl "${curl_args[@]}" "$CANVAS_URL/api/v1$endpoint" -o "$response_file")
+    # DEBUG: Log comprehensive request details
+    log "========== Canvas API Debug =========="
+    log "Method: $method"
+    log "Endpoint: $endpoint"
+    log "Full URL: $CANVAS_URL/api/v1$endpoint"
+    log "Headers: Authorization: Bearer [REDACTED], Content-Type: application/json"
     
-    log "API Request: $method $endpoint - HTTP $http_code"
+    if [[ -n "$data" ]]; then
+        log "Request Body (first 1000 chars):"
+        log "${data:0:1000}..."
+        log "Request Body Length: ${#data}"
+        
+        # Validate JSON before sending
+        if echo "$data" | jq . > /dev/null 2>&1; then
+            log "✓ Request JSON is valid"
+        else
+            log "✗ Request JSON is INVALID:"
+            echo "$data" | jq . 2>&1 | head -10 | while read -r line; do
+                log "JSON Error: $line"
+            done
+        fi
+    fi
+    
+    local http_code
+    http_code=$(curl "${curl_args[@]}" "$CANVAS_URL/api/v1$endpoint" -o "$response_file" 2>"$error_file")
+    
+    log "HTTP Response Code: $http_code"
+    
+    # Log curl errors if any
+    if [[ -s "$error_file" ]]; then
+        log "cURL Errors:"
+        cat "$error_file" | while read -r line; do
+            log "cURL: $line"
+        done
+    fi
+    
+    # Log response details
+    if [[ -f "$response_file" ]] && [[ -s "$response_file" ]]; then
+        local response_size
+        response_size=$(wc -c < "$response_file")
+        log "Response Size: $response_size bytes"
+        log "Response Body (first 500 chars):"
+        head -c 500 "$response_file" | while read -r line; do
+            log "Response: $line"
+        done
+    else
+        log "No response body received"
+    fi
+    
+    log "======================================"
     
     if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
         cat "$response_file"
-        rm -f "$response_file"
+        rm -f "$response_file" "$error_file"
         return 0
     else
-        local error_msg
-        error_msg=$(jq -r '.errors[]?.message // .message // "Unknown error"' "$response_file" 2>/dev/null || echo "API request failed")
+        local error_msg response_content
+        response_content=$(cat "$response_file" 2>/dev/null)
+        
+        # Try to parse structured error messages
+        error_msg=$(echo "$response_content" | jq -r '.errors[]?.message // .message // "Unknown error"' 2>/dev/null)
+        
+        if [[ "$error_msg" == "Unknown error" ]] && [[ -n "$response_content" ]]; then
+            error_msg="$response_content"
+        fi
+        
+        # Log detailed error information
+        log "API Error Details:"
+        log "HTTP Code: $http_code"
+        log "Error Message: $error_msg"
+        log "Full Response: $response_content"
+        
         error "API Error ($http_code): $error_msg"
-        rm -f "$response_file"
+        rm -f "$response_file" "$error_file"
         return 1
     fi
 }
@@ -613,10 +675,18 @@ format_date() {
     local date_str="$1"
     [[ -z "$date_str" ]] && return 0
     
+    # Canvas API expects ISO 8601 format in UTC with Z suffix
     if command -v gdate >/dev/null 2>&1; then
-        gdate -d "$date_str" --iso-8601=seconds 2>/dev/null
+        # GNU date (available via coreutils on macOS)
+        gdate -d "$date_str" -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null
     else
-        date -d "$date_str" --iso-8601=seconds 2>/dev/null || date -j -f "%Y-%m-%d %H:%M" "$date_str" "+%Y-%m-%dT%H:%M:%S%z"
+        # Try BSD date (macOS default) or fall back to GNU date  
+        if date -j -f "%Y-%m-%d %H:%M" "$date_str" "+%Y-%m-%dT%H:%M:00Z" 2>/dev/null; then
+            return 0
+        else
+            # Fallback: try to parse with GNU date if available
+            date -d "$date_str" -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null
+        fi
     fi
 }
 
@@ -643,8 +713,12 @@ validate_google_docs_url() {
 # Extract Google Docs ID from URL
 extract_google_docs_id() {
     local url="$1"
-    if [[ "$url" =~ /d/([a-zA-Z0-9-_]+) ]]; then
+    # Extract the document ID between /d/ and the next /
+    if [[ "$url" =~ /d/([a-zA-Z0-9_-]+) ]]; then
         echo "${BASH_REMATCH[1]}"
+    else
+        # Fallback: try to extract using sed
+        echo "$url" | sed -n 's|.*/d/\([a-zA-Z0-9_-]\+\).*|\1|p'
     fi
 }
 
@@ -818,57 +892,87 @@ collect_assignment_images() {
         
         case $image_option in
             1)
-                read -r -p "Enter content URL to embed as iframe (https://...): " image_url
+                read -r -p "Enter content URL (https://...): " image_url
                 if [[ -z "$image_url" ]]; then
                     echo -e "${YELLOW}⚠${NC} No URL entered, skipping..." >&2
                     continue
                 elif validate_url "$image_url"; then
+                    echo "" >&2
+                    echo "How should this be embedded?" >&2
+                    echo "1. As image (best for .jpg, .png, .gif - auto-scales)" >&2
+                    echo "2. As iframe (best for interactive content, PDFs)" >&2
+                    read -r -p "Choose embedding type (1-2): " embed_type
+                    embed_type="${embed_type:-1}"
                     read -r -p "Enter alt text/title (optional): " alt_text
                     
-                    echo "Choose iframe sizing:" >&2
-                    echo "1. Standard content (100% width, 300px height)" >&2
-                    echo "2. Video/interactive (16:9 responsive aspect ratio)" >&2
-                    echo "3. Custom dimensions" >&2
-                    read -r -p "Select option (1-3, default: 1): " size_option
-                    size_option="${size_option:-1}"
-                    
                     local img_tag=""
-                    case $size_option in
-                        1)
-                            # Standard content - Canvas LMS recommended default
-                            img_tag="<iframe src=\"$image_url\" style=\"width: 100%; height: 300px; border: 1px solid #ccc; overflow: hidden;\""
-                            [[ -n "$alt_text" ]] && img_tag="$img_tag title=\"$alt_text\""
-                            img_tag="$img_tag></iframe>"
-                            ;;
-                        2)
-                            # Responsive 16:9 aspect ratio - best for video/interactive content
-                            local container_style="width: 100%; min-width: 400px; max-width: 800px;"
-                            local wrapper_style="position: relative; width: 100%; overflow: hidden; padding-top: 56.25%;"
-                            local iframe_style="position: absolute; top: 0; left: 0; right: 0; width: 100%; height: 100%; border: 1px solid #ccc;"
-                            
-                            img_tag="<div style=\"$container_style\"><div style=\"$wrapper_style\">"
-                            img_tag="$img_tag<iframe src=\"$image_url\" style=\"$iframe_style\""
-                            [[ -n "$alt_text" ]] && img_tag="$img_tag title=\"$alt_text\""
-                            img_tag="$img_tag allowfullscreen></iframe></div></div>"
-                            ;;
-                        3)
-                            # Custom dimensions
-                            read -r -p "Enter width (default: 100%): " custom_width
-                            custom_width="${custom_width:-100%}"
-                            read -r -p "Enter height in pixels (default: 400): " custom_height
-                            custom_height="${custom_height:-400}"
-                            
-                            # Add 'px' to height if it's just a number
-                            [[ "$custom_height" =~ ^[0-9]+$ ]] && custom_height="${custom_height}px"
-                            
-                            img_tag="<iframe src=\"$image_url\" style=\"width: $custom_width; height: $custom_height; border: 1px solid #ccc; overflow: hidden;\""
-                            [[ -n "$alt_text" ]] && img_tag="$img_tag title=\"$alt_text\""
-                            img_tag="$img_tag></iframe>"
-                            ;;
-                    esac
+                    
+                    if [[ "$embed_type" == "1" ]]; then
+                        # Image embedding - auto-scales and responsive
+                        echo "Choose image sizing:" >&2
+                        echo "1. Responsive (auto-scales, max width 100%)" >&2
+                        echo "2. Custom width" >&2
+                        read -r -p "Select option (1-2, default: 1): " img_option
+                        img_option="${img_option:-1}"
+                        
+                        case $img_option in
+                            1)
+                                img_tag="<img src=\"$image_url\" style=\"max-width: 100%; height: auto; border: 1px solid #ccc;\""
+                                [[ -n "$alt_text" ]] && img_tag="$img_tag alt=\"$alt_text\""
+                                img_tag="$img_tag />"
+                                ;;
+                            2)
+                                read -r -p "Enter max width (default: 800px): " custom_width
+                                custom_width="${custom_width:-800px}"
+                                [[ "$custom_width" =~ ^[0-9]+$ ]] && custom_width="${custom_width}px"
+                                
+                                img_tag="<img src=\"$image_url\" style=\"max-width: $custom_width; width: 100%; height: auto; border: 1px solid #ccc;\""
+                                [[ -n "$alt_text" ]] && img_tag="$img_tag alt=\"$alt_text\""
+                                img_tag="$img_tag />"
+                                ;;
+                        esac
+                        echo -e "${GREEN}✓${NC} Image added (auto-scaling)" >&2
+                    else
+                        # Iframe embedding
+                        echo "Choose iframe sizing:" >&2
+                        echo "1. Standard content (100% width, 300px height)" >&2
+                        echo "2. Video/interactive (16:9 responsive aspect ratio)" >&2
+                        echo "3. Custom dimensions" >&2
+                        read -r -p "Select option (1-3, default: 1): " size_option
+                        size_option="${size_option:-1}"
+                        
+                        case $size_option in
+                            1)
+                                img_tag="<iframe src=\"$image_url\" style=\"width: 100%; height: 300px; border: 1px solid #ccc; overflow: hidden;\""
+                                [[ -n "$alt_text" ]] && img_tag="$img_tag title=\"$alt_text\""
+                                img_tag="$img_tag></iframe>"
+                                ;;
+                            2)
+                                local container_style="width: 100%; min-width: 400px; max-width: 800px;"
+                                local wrapper_style="position: relative; width: 100%; overflow: hidden; padding-top: 56.25%;"
+                                local iframe_style="position: absolute; top: 0; left: 0; right: 0; width: 100%; height: 100%; border: 1px solid #ccc;"
+                                
+                                img_tag="<div style=\"$container_style\"><div style=\"$wrapper_style\">"
+                                img_tag="$img_tag<iframe src=\"$image_url\" style=\"$iframe_style\""
+                                [[ -n "$alt_text" ]] && img_tag="$img_tag title=\"$alt_text\""
+                                img_tag="$img_tag allowfullscreen></iframe></div></div>"
+                                ;;
+                            3)
+                                read -r -p "Enter width (default: 100%): " custom_width
+                                custom_width="${custom_width:-100%}"
+                                read -r -p "Enter height in pixels (default: 400): " custom_height
+                                custom_height="${custom_height:-400}"
+                                [[ "$custom_height" =~ ^[0-9]+$ ]] && custom_height="${custom_height}px"
+                                
+                                img_tag="<iframe src=\"$image_url\" style=\"width: $custom_width; height: $custom_height; border: 1px solid #ccc; overflow: hidden;\""
+                                [[ -n "$alt_text" ]] && img_tag="$img_tag title=\"$alt_text\""
+                                img_tag="$img_tag></iframe>"
+                                ;;
+                        esac
+                        echo -e "${GREEN}✓${NC} Content URL added as iframe" >&2
+                    fi
                     
                     images_html="$images_html<p>$img_tag</p>"
-                    echo -e "${GREEN}✓${NC} Content URL added as iframe" >&2
                     ((image_count++))
                 else
                     echo -e "${RED}✗${NC} Invalid URL format: $image_url" >&2
@@ -972,6 +1076,13 @@ collect_google_docs_templates() {
                     doc_id=$(extract_google_docs_id "$docs_url")
                     doc_type=$(get_google_docs_type "$docs_url")
                     template_url=$(create_google_docs_template_url "$doc_id" "$doc_type")
+                    
+                    # DEBUG: Log the extraction process
+                    log "DEBUG: Google Docs URL processing:"
+                    log "  Input URL: $docs_url"
+                    log "  Extracted ID: '$doc_id'"
+                    log "  Document Type: '$doc_type'"
+                    log "  Template URL: '$template_url'"
                     
                     read -r -p "Enter template name (e.g., 'Assignment Template'): " template_name
                     [[ -z "$template_name" ]] && template_name="Google Docs Template"
