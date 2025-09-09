@@ -810,7 +810,7 @@ collect_assignment_images() {
     while true; do
         echo "" >&2
         echo "Image $((image_count + 1)):" >&2
-        echo "1. Enter image URL" >&2
+        echo "1. Enter image/content URL (will be embedded as iframe)" >&2
         echo "2. Upload local file" >&2
         echo "3. Done adding images" >&2
         echo "" >&2
@@ -818,7 +818,7 @@ collect_assignment_images() {
         
         case $image_option in
             1)
-                read -r -p "Enter image URL (https://...): " image_url
+                read -r -p "Enter content URL to embed as iframe (https://...): " image_url
                 if [[ -z "$image_url" ]]; then
                     echo -e "${YELLOW}⚠${NC} No URL entered, skipping..." >&2
                     continue
@@ -826,13 +826,19 @@ collect_assignment_images() {
                     read -r -p "Enter alt text (optional): " alt_text
                     read -r -p "Enter image width in pixels (optional): " img_width
                     
-                    local img_tag="<img src=\"$image_url\""
-                    [[ -n "$alt_text" ]] && img_tag="$img_tag alt=\"$alt_text\""
-                    [[ -n "$img_width" ]] && img_tag="$img_tag width=\"$img_width\""
-                    img_tag="$img_tag style=\"max-width: 100%; height: auto;\" />"
+                    local iframe_height="400"
+                    read -r -p "Enter iframe height in pixels (default: 400): " iframe_height_input
+                    [[ -n "$iframe_height_input" ]] && iframe_height="$iframe_height_input"
+                    
+                    local iframe_width="100%"
+                    [[ -n "$img_width" ]] && iframe_width="${img_width}px"
+                    
+                    local img_tag="<iframe src=\"$image_url\" width=\"$iframe_width\" height=\"${iframe_height}px\" frameborder=\"0\""
+                    [[ -n "$alt_text" ]] && img_tag="$img_tag title=\"$alt_text\""
+                    img_tag="$img_tag style=\"max-width: 100%; border: 1px solid #ccc;\"></iframe>"
                     
                     images_html="$images_html<p>$img_tag</p>"
-                    echo -e "${GREEN}✓${NC} Image URL added" >&2
+                    echo -e "${GREEN}✓${NC} Content URL added as iframe" >&2
                     ((image_count++))
                 else
                     echo -e "${RED}✗${NC} Invalid URL format: $image_url" >&2
@@ -998,8 +1004,8 @@ collect_assignment_details() {
     local assignment_name description points_possible due_at unlock_at lock_at
     local assignment_group_id submission_types grading_type published
     
-    echo -e "\n${BOLD}${CYAN}Assignment Details${NC}"
-    echo "=================="
+    echo -e "\n${BOLD}${CYAN}Assignment Details${NC}" >&2
+    echo "==================" >&2
     
     # Assignment name
     while [[ -z "$assignment_name" ]]; do
@@ -1008,7 +1014,7 @@ collect_assignment_details() {
     done
     
     # Description
-    echo ""
+    echo "" >&2
     read -r -p "Enter assignment description (optional): " description
     
     # Collect images and add to description
@@ -1153,7 +1159,7 @@ collect_assignment_details() {
             \"published\": $published"
     
     [[ -n "$assignment_group_id" ]] && assignment_data="${assignment_data},
-        \"assignment_group_id\": \"$assignment_group_id\""
+        \"assignment_group_id\": $assignment_group_id"
     [[ -n "$due_at" ]] && assignment_data="${assignment_data},
         \"due_at\": \"$due_at\""
     [[ -n "$unlock_at" ]] && assignment_data="${assignment_data},
@@ -1176,6 +1182,21 @@ create_assignment() {
     echo -e "\n${BOLD}Assignment Summary:${NC}"
     echo "==================="
     
+    # DEBUG: Log the raw JSON before parsing
+    echo -e "\n${YELLOW}DEBUG: Raw assignment_data (first 500 chars):${NC}" >&2
+    echo "${assignment_data:0:500}..." >&2
+    echo -e "\n${YELLOW}DEBUG: assignment_data length: ${#assignment_data}${NC}" >&2
+    
+    # DEBUG: Test JSON validity
+    if echo "$assignment_data" | jq . > /dev/null 2>&1; then
+        echo -e "${GREEN}DEBUG: JSON is valid${NC}" >&2
+    else
+        echo -e "${RED}DEBUG: JSON is INVALID - here's the jq error:${NC}" >&2
+        echo "$assignment_data" | jq . >&2
+        echo -e "\n${RED}DEBUG: Full raw JSON:${NC}" >&2
+        echo "$assignment_data" >&2
+        return 1
+    fi
     
     echo "$assignment_data" | jq -r '.assignment | "Name: \(.name)\nPoints: \(.points_possible)\nGrading: \(.grading_type)\nPublished: \(.published)"'
     
