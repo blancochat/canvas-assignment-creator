@@ -810,7 +810,7 @@ collect_assignment_images() {
     while true; do
         echo "" >&2
         echo "Image $((image_count + 1)):" >&2
-        echo "1. Enter image/content URL (will be embedded as iframe)" >&2
+        echo "1. Enter content URL (embedded as responsive iframe)" >&2
         echo "2. Upload local file" >&2
         echo "3. Done adding images" >&2
         echo "" >&2
@@ -823,19 +823,49 @@ collect_assignment_images() {
                     echo -e "${YELLOW}⚠${NC} No URL entered, skipping..." >&2
                     continue
                 elif validate_url "$image_url"; then
-                    read -r -p "Enter alt text (optional): " alt_text
-                    read -r -p "Enter image width in pixels (optional): " img_width
+                    read -r -p "Enter alt text/title (optional): " alt_text
                     
-                    local iframe_height="400"
-                    read -r -p "Enter iframe height in pixels (default: 400): " iframe_height_input
-                    [[ -n "$iframe_height_input" ]] && iframe_height="$iframe_height_input"
+                    echo "Choose iframe sizing:" >&2
+                    echo "1. Standard content (100% width, 300px height)" >&2
+                    echo "2. Video/interactive (16:9 responsive aspect ratio)" >&2
+                    echo "3. Custom dimensions" >&2
+                    read -r -p "Select option (1-3, default: 1): " size_option
+                    size_option="${size_option:-1}"
                     
-                    local iframe_width="100%"
-                    [[ -n "$img_width" ]] && iframe_width="${img_width}px"
-                    
-                    local img_tag="<iframe src=\"$image_url\" width=\"$iframe_width\" height=\"${iframe_height}px\" frameborder=\"0\""
-                    [[ -n "$alt_text" ]] && img_tag="$img_tag title=\"$alt_text\""
-                    img_tag="$img_tag style=\"max-width: 100%; border: 1px solid #ccc;\"></iframe>"
+                    local img_tag=""
+                    case $size_option in
+                        1)
+                            # Standard content - Canvas LMS recommended default
+                            img_tag="<iframe src=\"$image_url\" style=\"width: 100%; height: 300px; border: 1px solid #ccc; overflow: hidden;\""
+                            [[ -n "$alt_text" ]] && img_tag="$img_tag title=\"$alt_text\""
+                            img_tag="$img_tag></iframe>"
+                            ;;
+                        2)
+                            # Responsive 16:9 aspect ratio - best for video/interactive content
+                            local container_style="width: 100%; min-width: 400px; max-width: 800px;"
+                            local wrapper_style="position: relative; width: 100%; overflow: hidden; padding-top: 56.25%;"
+                            local iframe_style="position: absolute; top: 0; left: 0; right: 0; width: 100%; height: 100%; border: 1px solid #ccc;"
+                            
+                            img_tag="<div style=\"$container_style\"><div style=\"$wrapper_style\">"
+                            img_tag="$img_tag<iframe src=\"$image_url\" style=\"$iframe_style\""
+                            [[ -n "$alt_text" ]] && img_tag="$img_tag title=\"$alt_text\""
+                            img_tag="$img_tag allowfullscreen></iframe></div></div>"
+                            ;;
+                        3)
+                            # Custom dimensions
+                            read -r -p "Enter width (default: 100%): " custom_width
+                            custom_width="${custom_width:-100%}"
+                            read -r -p "Enter height in pixels (default: 400): " custom_height
+                            custom_height="${custom_height:-400}"
+                            
+                            # Add 'px' to height if it's just a number
+                            [[ "$custom_height" =~ ^[0-9]+$ ]] && custom_height="${custom_height}px"
+                            
+                            img_tag="<iframe src=\"$image_url\" style=\"width: $custom_width; height: $custom_height; border: 1px solid #ccc; overflow: hidden;\""
+                            [[ -n "$alt_text" ]] && img_tag="$img_tag title=\"$alt_text\""
+                            img_tag="$img_tag></iframe>"
+                            ;;
+                    esac
                     
                     images_html="$images_html<p>$img_tag</p>"
                     echo -e "${GREEN}✓${NC} Content URL added as iframe" >&2
