@@ -128,6 +128,12 @@ validate_canvas_url() {
         url="https://$url"
     fi
     
+    # Enforce HTTPS for Canvas URLs
+    if [[ "$url" =~ ^http://(.*)$ ]]; then
+        url="https://${BASH_REMATCH[1]}"
+        info "🔒 Automatically upgraded Canvas URL to HTTPS for security"
+    fi
+    
     url="${url%/}"
     
     if ! curl -s --head "$url" > /dev/null 2>&1; then
@@ -690,7 +696,27 @@ format_date() {
     fi
 }
 
-# Validate URL format
+# Convert HTTP to HTTPS and validate URL format
+validate_and_enforce_https() {
+    local url="$1"
+    
+    # First check if it's a valid URL format
+    if [[ ! "$url" =~ ^https?://[^[:space:]]+$ ]]; then
+        return 1
+    fi
+    
+    # Convert HTTP to HTTPS if needed
+    if [[ "$url" =~ ^http://(.*)$ ]]; then
+        url="https://${BASH_REMATCH[1]}"
+        echo "🔒 Automatically upgraded HTTP to HTTPS: $url" >&2
+    fi
+    
+    # Return the (potentially modified) URL
+    echo "$url"
+    return 0
+}
+
+# Validate URL format (legacy function for backward compatibility)
 validate_url() {
     local url="$1"
     if [[ "$url" =~ ^https?://[^[:space:]]+$ ]]; then
@@ -1106,13 +1132,19 @@ collect_assignment_images() {
         
         case $image_option in
             1)
-                read -r -p "Enter content URL (https://...): " image_url
+                read -r -p "Enter content URL (http/https - will be upgraded to HTTPS): " image_url
                 if [[ -z "$image_url" ]]; then
                     echo -e "${YELLOW}⚠${NC} No URL entered, skipping..." >&2
                     continue
-                elif validate_url "$image_url"; then
-                    # Detect content type automatically
-                    local content_type=$(detect_content_type "$image_url")
+                else
+                    # Validate and enforce HTTPS
+                    local https_url
+                    if https_url=$(validate_and_enforce_https "$image_url"); then
+                        # Update the URL to the HTTPS version
+                        image_url="$https_url"
+                        
+                        # Detect content type automatically
+                        local content_type=$(detect_content_type "$image_url")
                     
                     echo "" >&2
                     case "$content_type" in
@@ -1182,12 +1214,13 @@ collect_assignment_images() {
                         esac
                         
                         ((image_count++))
+                        else
+                            echo -e "${RED}✗${NC} Failed to generate embedding code" >&2
+                        fi
                     else
-                        echo -e "${RED}✗${NC} Failed to generate embedding code" >&2
+                        echo -e "${RED}✗${NC} Invalid URL format: $image_url" >&2
+                        echo -e "${RED}✗${NC} Please use a valid https:// or http:// URL" >&2
                     fi
-                else
-                    echo -e "${RED}✗${NC} Invalid URL format: $image_url" >&2
-                    echo -e "${RED}✗${NC} Please use a valid https:// or http:// URL" >&2
                 fi
                 ;;
             2)
@@ -1282,7 +1315,11 @@ collect_google_docs_templates() {
                 if [[ -z "$docs_url" ]]; then
                     echo -e "${YELLOW}⚠${NC} No URL entered, skipping..." >&2
                     continue
-                elif validate_google_docs_url "$docs_url"; then
+                else
+                    # Validate and enforce HTTPS for Google Docs URLs
+                    local https_docs_url
+                    if https_docs_url=$(validate_and_enforce_https "$docs_url") && validate_google_docs_url "$https_docs_url"; then
+                        docs_url="$https_docs_url"
                     local doc_id doc_type template_url
                     doc_id=$(extract_google_docs_id "$docs_url")
                     doc_type=$(get_google_docs_type "$docs_url")
@@ -1316,13 +1353,14 @@ collect_google_docs_templates() {
                     template_html="$template_html<p><em>Click the link above to create your own copy of this template</em></p>"
                     template_html="$template_html</div>"
                     
-                    docs_html="$docs_html$template_html"
-                    echo -e "${GREEN}✓${NC} Google Docs template added: $template_name" >&2
-                    ((docs_count++))
-                else
-                    echo -e "${RED}✗${NC} Invalid Google Docs URL: $docs_url" >&2
-                    echo "Please use a valid Google Docs URL like:" >&2
-                    echo "https://docs.google.com/document/d/1ABCdef123.../edit" >&2
+                        docs_html="$docs_html$template_html"
+                        echo -e "${GREEN}✓${NC} Google Docs template added: $template_name" >&2
+                        ((docs_count++))
+                    else
+                        echo -e "${RED}✗${NC} Invalid Google Docs URL: $docs_url" >&2
+                        echo "Please use a valid Google Docs URL like:" >&2
+                        echo "https://docs.google.com/document/d/1ABCdef123.../edit" >&2
+                    fi
                 fi
                 ;;
             2)
